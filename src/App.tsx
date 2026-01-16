@@ -1,9 +1,9 @@
-// src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
-// @ts-ignore: solar2lunar 没有类型声明，用 any 处理
+// @ts-ignore: solar2lunar 没有类型声明
 import calendar from "solar2lunar";
 
-type EventCategoryId = "diet" | "excretion" | "sleep" | "activity";
+// 分类 ID 放宽为 string，方便以后扩展
+type EventCategoryId = string;
 
 interface Category {
   id: EventCategoryId;
@@ -18,18 +18,18 @@ interface EventDefinition {
 }
 
 interface EventExtra {
-  urineColor?: string; // 排尿颜色
-  stoolColor?: string; // 排便颜色
-  isAbnormal?: boolean; // 是否异常
-  satietyPercent?: number; // 饱腹感百分比
-  waterMl?: number; // 喝水 ml
-  note?: string; // 文本备注
+  urineColor?: string;
+  stoolColor?: string;
+  isAbnormal?: boolean;
+  satietyPercent?: number;
+  waterMl?: number;
+  note?: string;
 }
 
 interface EventRecord {
   id: string;
   eventDefId: string;
-  timestamp: string; // ISO 字符串，只记录一个时间点
+  timestamp: string; // 单一时间点，本地日期用它来换算
   extras?: EventExtra;
 }
 
@@ -50,15 +50,17 @@ type ActiveTab = "log" | "daily";
 
 const EVENTS_KEY = "healthkey_events_v2";
 const DAYMETA_KEY = "healthkey_daymeta_v1";
+const CATEGORIES_KEY = "healthkey_categories_v1";
+const EVENTDEFS_KEY = "healthkey_eventdefs_v1";
 
-const categories: Category[] = [
+const DEFAULT_CATEGORIES: Category[] = [
   { id: "diet", label: "饮食", color: "#ff9f43" },
   { id: "excretion", label: "排泄", color: "#f368e0" },
   { id: "sleep", label: "睡眠", color: "#54a0ff" },
   { id: "activity", label: "活动", color: "#1dd1a1" },
 ];
 
-const defaultEventDefs: EventDefinition[] = [
+const DEFAULT_EVENT_DEFS: EventDefinition[] = [
   // 饮食
   { id: "breakfast", label: "早餐", categoryId: "diet" },
   { id: "lunch", label: "午餐", categoryId: "diet" },
@@ -93,9 +95,14 @@ function formatTime(date: Date): string {
   return `${hh}:${mm}`;
 }
 
+// 把 ISO 时间串转换为「本地日期」字符串，用来分组
+function getLocalDateFromISO(iso: string): string {
+  return formatDate(new Date(iso));
+}
+
 function groupEventsByDate(events: EventRecord[]): Record<string, EventRecord[]> {
   return events.reduce<Record<string, EventRecord[]>>((acc, e) => {
-    const d = e.timestamp.slice(0, 10);
+    const d = getLocalDateFromISO(e.timestamp);
     if (!acc[d]) acc[d] = [];
     acc[d].push(e);
     return acc;
@@ -162,30 +169,36 @@ function getWeatherSummary(weather?: DayMetaWeather): string {
 
 const weekdayText = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
+// 内置事件 ID，用来防止误删
+const BUILTIN_EVENT_IDS = new Set(DEFAULT_EVENT_DEFS.map((d) => d.id));
+
 const App: React.FC = () => {
   const [events, setEvents] = useState<EventRecord[]>([]);
-  const [eventDefs] = useState<EventDefinition[]>(defaultEventDefs);
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [eventDefs, setEventDefs] = useState<EventDefinition[]>(DEFAULT_EVENT_DEFS);
   const [dayMetaMap, setDayMetaMap] = useState<Record<string, DayMeta>>({});
   const [activeTab, setActiveTab] = useState<ActiveTab>("log");
   const [selectedDate, setSelectedDate] = useState<string>(formatDate(new Date()));
 
-  // 编辑状态：只编辑一个时间点 + 附加信息
+  // 编辑记录
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [editingTime, setEditingTime] = useState<string>("");
   const [editingExtras, setEditingExtras] = useState<EventExtra>({});
+
+  // 管理打卡项
+  const [isManageOpen, setIsManageOpen] = useState(false);
 
   // 日历选择器
   const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState<number>(new Date().getFullYear());
   const [pickerMonth, setPickerMonth] = useState<number>(new Date().getMonth() + 1);
 
-  // 初始化：加载本地记录
+  // 初始化：加载本地记录 + 自定义分类/打卡项
   useEffect(() => {
     try {
       const storedEvents = localStorage.getItem(EVENTS_KEY);
       if (storedEvents) {
         const parsed: EventRecord[] = JSON.parse(storedEvents);
-        // 只按时间降序排列一次
         parsed.sort(
           (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
         );
@@ -208,9 +221,33 @@ const App: React.FC = () => {
     } catch {
       // ignore
     }
+
+    try {
+      const catStr = localStorage.getItem(CATEGORIES_KEY);
+      if (catStr) {
+        const parsed: Category[] = JSON.parse(catStr);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setCategories(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const defStr = localStorage.getItem(EVENTDEFS_KEY);
+      if (defStr) {
+        const parsed: EventDefinition[] = JSON.parse(defStr);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setEventDefs(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
   }, []);
 
-  // 初始化：为当天创建 DayMeta，并尝试获取当天天气
+  // 当天元数据 + 天气
   useEffect(() => {
     const today = formatDate(new Date());
 
@@ -253,13 +290,13 @@ const App: React.FC = () => {
             });
         },
         () => {
-          // 用户拒绝定位，不做处理
+          // ignore
         },
       );
     }
   }, [dayMetaMap]);
 
-  // 支持通过 URL 参数写入当天步数（未来可配合捷径）
+  // URL 参数写入步数（未来可和捷径联动）
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const stepsParam = params.get("steps");
@@ -278,15 +315,24 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // events 改变时保存
+  // 持久化 events
   useEffect(() => {
     localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
   }, [events]);
 
+  // 持久化 categories / eventDefs
+  useEffect(() => {
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(categories));
+  }, [categories]);
+
+  useEffect(() => {
+    localStorage.setItem(EVENTDEFS_KEY, JSON.stringify(eventDefs));
+  }, [eventDefs]);
+
   const eventsByDate = useMemo(() => groupEventsByDate(events), [events]);
 
-  const todayDateStr = formatDate(new Date());
-  const todayEvents = eventsByDate[todayDateStr] || [];
+  const todayStr = formatDate(new Date());
+  const todayEvents = eventsByDate[todayStr] || [];
   const selectedDayEvents = eventsByDate[selectedDate] || [];
   const selectedDayMeta = dayMetaMap[selectedDate];
 
@@ -297,12 +343,16 @@ const App: React.FC = () => {
 
   const headerDate = new Date();
   const headerLunar = getLunarInfoForDate(headerDate);
-
   const todayWeekday = weekdayText[headerDate.getDay()];
+  const todayMeta = dayMetaMap[todayStr];
 
   const getEventDef = (id: string) => eventDefs.find((d) => d.id === id);
-  const getCategoryById = (id: EventCategoryId) =>
-    categories.find((c) => c.id === id)!;
+
+  const getCategoryById = (id: EventCategoryId): Category => {
+    const found = categories.find((c) => c.id === id);
+    if (found) return found;
+    return { id, label: "其他", color: "#8395a7" };
+  };
 
   // 打卡：单击即记录一个时间点
   const handleLogEvent = (eventDefId: string) => {
@@ -341,7 +391,7 @@ const App: React.FC = () => {
     const evt = events.find((e) => e.id === editingEventId);
     if (!evt) return;
 
-    const datePart = evt.timestamp.slice(0, 10);
+    const datePart = getLocalDateFromISO(evt.timestamp);
     const [hh, mm] = editingTime.split(":").map((s) => parseInt(s, 10));
     if (Number.isNaN(hh) || Number.isNaN(mm)) {
       alert("请填写正确的时间（HH:MM）");
@@ -391,7 +441,7 @@ const App: React.FC = () => {
     const firstDay = new Date(pickerYear, pickerMonth - 1, 1);
     const startWeekday = firstDay.getDay();
     const daysInMonth = new Date(pickerYear, pickerMonth, 0).getDate();
-    const todayStr = formatDate(new Date());
+    const todayLocalStr = formatDate(new Date());
 
     const cells: React.ReactNode[] = [];
     for (let i = 0; i < startWeekday; i++) {
@@ -402,7 +452,7 @@ const App: React.FC = () => {
       const dateStr = formatDate(date);
       const hasEvents = allDatesWithEvents.has(dateStr);
       const isSelected = selectedDate === dateStr;
-      const isToday = todayStr === dateStr;
+      const isToday = todayLocalStr === dateStr;
       const disabled = !hasEvents;
 
       cells.push(
@@ -427,18 +477,14 @@ const App: React.FC = () => {
     return cells;
   };
 
-  // 每日记录分类汇总
+  // 每日记录分类汇总（动态分类）
   const dailySummaryByCategory = useMemo(() => {
-    const summary: Record<EventCategoryId, number> = {
-      diet: 0,
-      excretion: 0,
-      sleep: 0,
-      activity: 0,
-    };
+    const summary = new Map<EventCategoryId, number>();
     selectedDayEvents.forEach((evt) => {
       const def = getEventDef(evt.eventDefId);
       if (!def) return;
-      summary[def.categoryId] += 1;
+      const catId = def.categoryId;
+      summary.set(catId, (summary.get(catId) || 0) + 1);
     });
     return summary;
   }, [selectedDayEvents, eventDefs]);
@@ -458,7 +504,7 @@ const App: React.FC = () => {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    padding: "12px 12px 72px 12px", // 底部留出 tab 的空间
+    padding: "12px 12px 76px 12px", // 底部预留 tab 空间
     boxSizing: "border-box",
   };
 
@@ -484,7 +530,7 @@ const App: React.FC = () => {
     bottom: 0,
     borderTop: "1px solid rgba(0,0,0,0.06)",
     backgroundColor: "#ffffff",
-    padding: "6px 0 4px 0",
+    padding: "8px 0 6px 0",
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
@@ -494,8 +540,8 @@ const App: React.FC = () => {
   const tabButtonStyle = (active: boolean): React.CSSProperties => ({
     flex: 1,
     textAlign: "center",
-    fontSize: 12,
-    padding: "4px 0 0 0",
+    fontSize: 13,
+    padding: "4px 0",
     color: active ? "#1677ff" : "#666",
     fontWeight: active ? 600 : 500,
   });
@@ -503,23 +549,20 @@ const App: React.FC = () => {
   const pillButtonStyle = (color: string): React.CSSProperties => ({
     borderRadius: 999,
     border: "none",
-    padding: "6px 10px",
-    fontSize: 13,
+    padding: "7px 12px",
+    fontSize: 14,
     fontWeight: 500,
     color: "#fff",
     background: color,
-    margin: "4px 6px 4px 0",
+    margin: "4px 8px 4px 0",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
     boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
   });
 
-  const todayMeta = dayMetaMap[todayDateStr];
-
-  // 顶部头部：日期 + 农历 + 天气 + 步数
   const renderHeader = () => {
-    const todayStr = formatDate(headerDate);
+    const todayLocalStr = formatDate(headerDate);
 
     return (
       <header
@@ -540,7 +583,7 @@ const App: React.FC = () => {
               HealthKey
             </div>
             <div style={{ fontSize: 13, color: "#666", marginTop: 4 }}>
-              {todayStr} · {todayWeekday}
+              {todayLocalStr} · {todayWeekday}
             </div>
             <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
               {headerLunar.lunarText}
@@ -564,21 +607,38 @@ const App: React.FC = () => {
     );
   };
 
-  // 打卡按钮区域
   const renderEventButtons = () => {
-    const grouped: Record<EventCategoryId, EventDefinition[]> = {
-      diet: [],
-      excretion: [],
-      sleep: [],
-      activity: [],
-    };
+    const grouped: Record<string, EventDefinition[]> = {};
     eventDefs.forEach((d) => {
+      if (!grouped[d.categoryId]) grouped[d.categoryId] = [];
       grouped[d.categoryId].push(d);
     });
 
     return (
       <div style={cardStyle}>
-        <div style={sectionTitleStyle}>打卡 · 生理输入 & 输出</div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 8,
+          }}
+        >
+          <div style={sectionTitleStyle}>打卡 · 生理输入 & 输出</div>
+          <button
+            onClick={() => setIsManageOpen(true)}
+            style={{
+              borderRadius: 999,
+              border: "1px solid rgba(0,0,0,0.12)",
+              padding: "4px 10px",
+              backgroundColor: "#fff",
+              fontSize: 12,
+              color: "#555",
+            }}
+          >
+            管理打卡项
+          </button>
+        </div>
         {categories.map((cat) => (
           <div key={cat.id} style={{ marginBottom: 6 }}>
             <div
@@ -603,7 +663,7 @@ const App: React.FC = () => {
               {cat.label}
             </div>
             <div style={{ display: "flex", flexWrap: "wrap" }}>
-              {grouped[cat.id].map((d) => (
+              {(grouped[cat.id] || []).map((d) => (
                 <button
                   key={d.id}
                   style={pillButtonStyle(cat.color)}
@@ -619,7 +679,6 @@ const App: React.FC = () => {
     );
   };
 
-  // 今日打卡记录列表（只显示一个时间点）
   const renderTodayList = () => {
     return (
       <div style={{ ...cardStyle, paddingTop: 8 }}>
@@ -722,7 +781,6 @@ const App: React.FC = () => {
     );
   };
 
-  // 每日记录：顶部概览
   const renderDailySummary = () => {
     const d = new Date(selectedDate);
     const weekday = weekdayText[d.getDay()];
@@ -736,12 +794,12 @@ const App: React.FC = () => {
         <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
           天气：
           {getWeatherSummary(
-            selectedDate === todayDateStr ? selectedDayMeta?.weather : undefined,
+            selectedDate === todayStr ? selectedDayMeta?.weather : undefined,
           )}
-          {selectedDate !== todayDateStr &&
+          {selectedDate !== todayStr &&
             "（当前仅支持显示今日天气，其他日期暂不记录天气历史）"}
         </div>
-        {typeof selectedDayMeta?.steps === "number" && selectedDate === todayDateStr && (
+        {typeof selectedDayMeta?.steps === "number" && selectedDate === todayStr && (
           <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
             步数：{selectedDayMeta.steps} 步
           </div>
@@ -785,7 +843,7 @@ const App: React.FC = () => {
                 {cat.label}
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: "#222" }}>
-                {dailySummaryByCategory[cat.id]} 次
+                {dailySummaryByCategory.get(cat.id) || 0} 次
               </div>
             </div>
           ))}
@@ -794,7 +852,6 @@ const App: React.FC = () => {
     );
   };
 
-  // 每日记录详细：只显示事件 + 时间 + 详情（不显示分类）
   const renderDailyList = () => {
     return (
       <div style={cardStyle}>
@@ -908,7 +965,6 @@ const App: React.FC = () => {
     );
   };
 
-  // 日期选择弹层
   const renderDatePickerOverlay = () => {
     if (!isDatePickerOpen) return null;
 
@@ -986,7 +1042,6 @@ const App: React.FC = () => {
     );
   };
 
-  // 编辑面板
   const renderEditPanel = () => {
     if (!editingEventId) return null;
     const evt = events.find((e) => e.id === editingEventId);
@@ -995,8 +1050,8 @@ const App: React.FC = () => {
     if (!def) return null;
 
     const extras = editingExtras;
-    const isDiet = def.categoryId === "diet";
-    const isExcretion = def.categoryId === "excretion";
+    const isDiet = getCategoryById(def.categoryId).id === "diet";
+    const isExcretion = getCategoryById(def.categoryId).id === "excretion";
 
     return (
       <div className="hk-overlay">
@@ -1216,6 +1271,197 @@ const App: React.FC = () => {
     );
   };
 
+  // 管理打卡项面板
+  const renderManagePanel = () => {
+    if (!isManageOpen) return null;
+
+    const updateCategory = (id: string, patch: Partial<Category>) => {
+      setCategories((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+      );
+    };
+
+    const updateEventDef = (id: string, patch: Partial<EventDefinition>) => {
+      setEventDefs((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, ...patch } : d)),
+      );
+    };
+
+    const addEventDef = () => {
+      const baseCat = categories[0]?.id || "diet";
+      const newDef: EventDefinition = {
+        id: `custom_${Date.now()}`,
+        label: "新打卡项",
+        categoryId: baseCat,
+      };
+      setEventDefs((prev) => [...prev, newDef]);
+    };
+
+    const removeEventDef = (id: string) => {
+      if (BUILTIN_EVENT_IDS.has(id)) {
+        alert("内置打卡项暂不支持删除，可以修改名称和分类。");
+        return;
+      }
+      setEventDefs((prev) => prev.filter((d) => d.id !== id));
+    };
+
+    return (
+      <div className="hk-overlay">
+        <div
+          className="hk-overlay-backdrop"
+          onClick={() => setIsManageOpen(false)}
+        />
+        <div className="hk-overlay-panel" style={{ maxHeight: "85vh" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 8,
+            }}
+          >
+            <div style={{ fontSize: 14, fontWeight: 600 }}>管理打卡项</div>
+            <button
+              onClick={() => setIsManageOpen(false)}
+              style={{
+                border: "none",
+                background: "transparent",
+                fontSize: 12,
+                color: "#666",
+              }}
+            >
+              关闭
+            </button>
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              paddingRight: 4,
+              marginRight: -4,
+            }}
+          >
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                分类
+              </div>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>
+                可以调整每个分类的名称和颜色（目前固定四类：饮食 / 排泄 / 睡眠 / 活动）。
+              </div>
+              {categories.map((cat) => (
+                <div
+                  key={cat.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 6,
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={cat.label}
+                    onChange={(e) =>
+                      updateCategory(cat.id, { label: e.target.value })
+                    }
+                    style={{
+                      flex: 1,
+                      padding: 4,
+                      fontSize: 12,
+                    }}
+                  />
+                  <input
+                    type="color"
+                    value={cat.color}
+                    onChange={(e) =>
+                      updateCategory(cat.id, { color: e.target.value })
+                    }
+                    style={{
+                      width: 36,
+                      height: 24,
+                      border: "none",
+                      padding: 0,
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                打卡事件
+              </div>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>
+                内置事件可改名和变更分类；自定义事件可以删除。
+              </div>
+              {eventDefs.map((d) => (
+                <div
+                  key={d.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    marginBottom: 6,
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={d.label}
+                    onChange={(e) =>
+                      updateEventDef(d.id, { label: e.target.value })
+                    }
+                    style={{ flex: 1.4, padding: 4, fontSize: 12 }}
+                  />
+                  <select
+                    value={d.categoryId}
+                    onChange={(e) =>
+                      updateEventDef(d.id, { categoryId: e.target.value })
+                    }
+                    style={{ flex: 1, padding: 4, fontSize: 12 }}
+                  >
+                    {categories.map((cat) => (
+                      <option key={cat.id} value={cat.id}>
+                        {cat.label}
+                      </option>
+                    ))}
+                  </select>
+                  {!BUILTIN_EVENT_IDS.has(d.id) && (
+                    <button
+                      onClick={() => removeEventDef(d.id)}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "#d63031",
+                        fontSize: 11,
+                      }}
+                    >
+                      删除
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                onClick={addEventDef}
+                style={{
+                  marginTop: 4,
+                  borderRadius: 999,
+                  border: "1px dashed rgba(0,0,0,0.2)",
+                  padding: "4px 10px",
+                  backgroundColor: "#fff",
+                  fontSize: 12,
+                  color: "#1677ff",
+                }}
+              >
+                + 新增打卡项
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div style={rootStyle}>
       {renderHeader()}
@@ -1268,7 +1514,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* 底部固定 TabBar */}
+      {/* 底部 TabBar */}
       <footer style={tabBarStyle}>
         <button
           style={tabButtonStyle(activeTab === "log")}
@@ -1286,8 +1532,9 @@ const App: React.FC = () => {
 
       {renderDatePickerOverlay()}
       {renderEditPanel()}
+      {renderManagePanel()}
 
-      {/* 全局样式，确保浅色模式清晰可见 */}
+      {/* 全局样式，强制浅色 + 弹层/日历样式 */}
       <style>{`
         body {
           background-color: #f4f5f7 !important;
