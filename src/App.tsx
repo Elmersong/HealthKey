@@ -1,7 +1,6 @@
 // src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
-// 农历 + 节气：需要先 npm install solar2lunar
-// @ts-ignore
+// @ts-ignore: solar2lunar 没有类型声明，用 any 处理
 import calendar from "solar2lunar";
 
 type EventCategoryId = "diet" | "excretion" | "sleep" | "activity";
@@ -30,7 +29,7 @@ interface EventExtra {
 interface EventRecord {
   id: string;
   eventDefId: string;
-  timestamp: string; // ISO 字符串
+  timestamp: string; // ISO 字符串，只记录一个时间点
   extras?: EventExtra;
 }
 
@@ -98,11 +97,12 @@ function groupEventsByDate(events: EventRecord[]): Record<string, EventRecord[]>
   return events.reduce<Record<string, EventRecord[]>>((acc, e) => {
     const d = e.timestamp.slice(0, 10);
     if (!acc[d]) acc[d] = [];
-    acc[d] = [...acc[d], e];
+    acc[d].push(e);
     return acc;
   }, {});
 }
 
+// 农历 + 节气 + 常见节日
 function getLunarInfoForDate(date: Date) {
   try {
     const y = date.getFullYear();
@@ -147,7 +147,7 @@ function getLunarInfoForDate(date: Date) {
   }
 }
 
-// 获取当天简短天气文案
+// 天气信息文案
 function getWeatherSummary(weather?: DayMetaWeather): string {
   if (!weather) return "天气数据暂无";
   const parts: string[] = [];
@@ -160,7 +160,6 @@ function getWeatherSummary(weather?: DayMetaWeather): string {
   return parts.join(" · ") || "天气数据暂无";
 }
 
-// 简单获取星期几
 const weekdayText = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 const App: React.FC = () => {
@@ -170,22 +169,26 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("log");
   const [selectedDate, setSelectedDate] = useState<string>(formatDate(new Date()));
 
-  // 编辑状态
+  // 编辑状态：只编辑一个时间点 + 附加信息
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [editingTime, setEditingTime] = useState<string>("");
   const [editingExtras, setEditingExtras] = useState<EventExtra>({});
 
-  // 每日记录日期选择器
+  // 日历选择器
   const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState<number>(new Date().getFullYear());
   const [pickerMonth, setPickerMonth] = useState<number>(new Date().getMonth() + 1);
 
-  // ==== 初始化：加载本地数据 ====
+  // 初始化：加载本地记录
   useEffect(() => {
     try {
       const storedEvents = localStorage.getItem(EVENTS_KEY);
       if (storedEvents) {
         const parsed: EventRecord[] = JSON.parse(storedEvents);
+        // 只按时间降序排列一次
+        parsed.sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+        );
         setEvents(parsed);
       }
     } catch {
@@ -207,7 +210,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // ==== 初始化：为当天创建元数据 & 拉取天气 ====
+  // 初始化：为当天创建 DayMeta，并尝试获取当天天气
   useEffect(() => {
     const today = formatDate(new Date());
 
@@ -250,13 +253,13 @@ const App: React.FC = () => {
             });
         },
         () => {
-          // 用户拒绝定位，不处理
+          // 用户拒绝定位，不做处理
         },
       );
     }
   }, [dayMetaMap]);
 
-  // ==== URL 步数参数写入当天元数据（如果以后用快捷指令写入） ====
+  // 支持通过 URL 参数写入当天步数（未来可配合捷径）
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const stepsParam = params.get("steps");
@@ -275,7 +278,7 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // ==== 保存 events 到 localStorage ====
+  // events 改变时保存
   useEffect(() => {
     localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
   }, [events]);
@@ -292,11 +295,16 @@ const App: React.FC = () => {
     [eventsByDate],
   );
 
-  // ==== 头部显示的日期 & 农历 / 节气 / 节日 ====
   const headerDate = new Date();
   const headerLunar = getLunarInfoForDate(headerDate);
 
-  // ==== 打卡 ====
+  const todayWeekday = weekdayText[headerDate.getDay()];
+
+  const getEventDef = (id: string) => eventDefs.find((d) => d.id === id);
+  const getCategoryById = (id: EventCategoryId) =>
+    categories.find((c) => c.id === id)!;
+
+  // 打卡：单击即记录一个时间点
   const handleLogEvent = (eventDefId: string) => {
     const now = new Date();
     const record: EventRecord = {
@@ -312,12 +320,7 @@ const App: React.FC = () => {
     });
   };
 
-  const getEventDef = (id: string) => eventDefs.find((d) => d.id === id);
-
-  const getCategoryById = (id: EventCategoryId) =>
-    categories.find((c) => c.id === id)!;
-
-  // ==== 编辑事件：打开详情 ====
+  // 编辑记录
   const openEditEvent = (eventId: string) => {
     const evt = events.find((e) => e.id === eventId);
     if (!evt) return;
@@ -369,7 +372,7 @@ const App: React.FC = () => {
     if (editingEventId === eventId) closeEdit();
   };
 
-  // ==== 每日记录：切换日期 ====
+  // 每日记录：日期选择
   const openDatePicker = () => {
     const d = new Date(selectedDate);
     setPickerYear(d.getFullYear());
@@ -399,7 +402,6 @@ const App: React.FC = () => {
       const dateStr = formatDate(date);
       const hasEvents = allDatesWithEvents.has(dateStr);
       const isSelected = selectedDate === dateStr;
-
       const isToday = todayStr === dateStr;
       const disabled = !hasEvents;
 
@@ -425,7 +427,7 @@ const App: React.FC = () => {
     return cells;
   };
 
-  // ==== 分类汇总（每日记录顶部） ====
+  // 每日记录分类汇总
   const dailySummaryByCategory = useMemo(() => {
     const summary: Record<EventCategoryId, number> = {
       diet: 0,
@@ -441,7 +443,7 @@ const App: React.FC = () => {
     return summary;
   }, [selectedDayEvents, eventDefs]);
 
-  // ==== UI 样式 ====
+  // UI 样式
   const rootStyle: React.CSSProperties = {
     minHeight: "100vh",
     display: "flex",
@@ -456,7 +458,7 @@ const App: React.FC = () => {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    padding: "12px 12px 4px 12px",
+    padding: "12px 12px 72px 12px", // 底部留出 tab 的空间
     boxSizing: "border-box",
   };
 
@@ -476,12 +478,17 @@ const App: React.FC = () => {
   };
 
   const tabBarStyle: React.CSSProperties = {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
     borderTop: "1px solid rgba(0,0,0,0.06)",
     backgroundColor: "#ffffff",
     padding: "6px 0 4px 0",
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
+    zIndex: 10,
   };
 
   const tabButtonStyle = (active: boolean): React.CSSProperties => ({
@@ -508,11 +515,11 @@ const App: React.FC = () => {
     boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
   });
 
+  const todayMeta = dayMetaMap[todayDateStr];
+
+  // 顶部头部：日期 + 农历 + 天气 + 步数
   const renderHeader = () => {
-    const today = new Date();
-    const dateStr = formatDate(today);
-    const weekday = weekdayText[today.getDay()];
-    const metaToday = dayMetaMap[dateStr];
+    const todayStr = formatDate(headerDate);
 
     return (
       <header
@@ -533,7 +540,7 @@ const App: React.FC = () => {
               HealthKey
             </div>
             <div style={{ fontSize: 13, color: "#666", marginTop: 4 }}>
-              {dateStr} · {weekday}
+              {todayStr} · {todayWeekday}
             </div>
             <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
               {headerLunar.lunarText}
@@ -544,12 +551,12 @@ const App: React.FC = () => {
           <div style={{ textAlign: "right", fontSize: 11, color: "#555" }}>
             <div style={{ marginBottom: 2 }}>
               步数：
-              {typeof metaToday?.steps === "number"
-                ? `${metaToday.steps} 步`
+              {typeof todayMeta?.steps === "number"
+                ? `${todayMeta.steps} 步`
                 : "未记录"}
             </div>
             <div style={{ maxWidth: 140 }}>
-              {getWeatherSummary(metaToday?.weather)}
+              {getWeatherSummary(todayMeta?.weather)}
             </div>
           </div>
         </div>
@@ -557,6 +564,7 @@ const App: React.FC = () => {
     );
   };
 
+  // 打卡按钮区域
   const renderEventButtons = () => {
     const grouped: Record<EventCategoryId, EventDefinition[]> = {
       diet: [],
@@ -611,6 +619,7 @@ const App: React.FC = () => {
     );
   };
 
+  // 今日打卡记录列表（只显示一个时间点）
   const renderTodayList = () => {
     return (
       <div style={{ ...cardStyle, paddingTop: 8 }}>
@@ -713,17 +722,26 @@ const App: React.FC = () => {
     );
   };
 
+  // 每日记录：顶部概览
   const renderDailySummary = () => {
+    const d = new Date(selectedDate);
+    const weekday = weekdayText[d.getDay()];
+
     return (
       <div style={cardStyle}>
         <div style={sectionTitleStyle}>当日概览</div>
         <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
-          日期：{selectedDate} · {weekdayText[new Date(selectedDate).getDay()]}
+          日期：{selectedDate} · {weekday}
         </div>
         <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
-          天气：{getWeatherSummary(selectedDayMeta?.weather)}
+          天气：
+          {getWeatherSummary(
+            selectedDate === todayDateStr ? selectedDayMeta?.weather : undefined,
+          )}
+          {selectedDate !== todayDateStr &&
+            "（当前仅支持显示今日天气，其他日期暂不记录天气历史）"}
         </div>
-        {typeof selectedDayMeta?.steps === "number" && (
+        {typeof selectedDayMeta?.steps === "number" && selectedDate === todayDateStr && (
           <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
             步数：{selectedDayMeta.steps} 步
           </div>
@@ -776,6 +794,7 @@ const App: React.FC = () => {
     );
   };
 
+  // 每日记录详细：只显示事件 + 时间 + 详情（不显示分类）
   const renderDailyList = () => {
     return (
       <div style={cardStyle}>
@@ -809,7 +828,7 @@ const App: React.FC = () => {
                 <div
                   style={{
                     display: "flex",
-                    justifyContent: "space之间",
+                    justifyContent: "space-between",
                     alignItems: "center",
                     gap: 6,
                   }}
@@ -889,6 +908,7 @@ const App: React.FC = () => {
     );
   };
 
+  // 日期选择弹层
   const renderDatePickerOverlay = () => {
     if (!isDatePickerOpen) return null;
 
@@ -966,6 +986,7 @@ const App: React.FC = () => {
     );
   };
 
+  // 编辑面板
   const renderEditPanel = () => {
     if (!editingEventId) return null;
     const evt = events.find((e) => e.id === editingEventId);
@@ -1238,7 +1259,7 @@ const App: React.FC = () => {
                 </button>
               </div>
               <div style={{ fontSize: 12, color: "#777" }}>
-                仅可选择有记录的日期；不同日期将显示对应日期记录到的天气和打卡情况。
+                仅可选择有记录的日期；不同日期会显示对应日期的打卡情况。
               </div>
             </div>
             {renderDailySummary()}
@@ -1247,7 +1268,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Tab Bar 固定在底部 */}
+      {/* 底部固定 TabBar */}
       <footer style={tabBarStyle}>
         <button
           style={tabButtonStyle(activeTab === "log")}
@@ -1266,8 +1287,12 @@ const App: React.FC = () => {
       {renderDatePickerOverlay()}
       {renderEditPanel()}
 
-      {/* 一些简单的样式，配合上面的 className 使用 */}
+      {/* 全局样式，确保浅色模式清晰可见 */}
       <style>{`
+        body {
+          background-color: #f4f5f7 !important;
+          color: #111 !important;
+        }
         .hk-overlay {
           position: fixed;
           inset: 0;
