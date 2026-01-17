@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 // @ts-ignore: solar2lunar 没有类型声明
 import calendar from "solar2lunar";
 
-// 分类 ID 放宽为 string，方便以后扩展
+// 分类 ID 放宽为 string，方便新增
 type EventCategoryId = string;
 
 interface Category {
@@ -29,7 +29,7 @@ interface EventExtra {
 interface EventRecord {
   id: string;
   eventDefId: string;
-  timestamp: string; // 单一时间点，本地日期用它来换算
+  timestamp: string;
   extras?: EventExtra;
 }
 
@@ -41,7 +41,7 @@ interface DayMetaWeather {
 }
 
 interface DayMeta {
-  date: string; // YYYY-MM-DD
+  date: string;
   weather?: DayMetaWeather;
   steps?: number;
 }
@@ -95,7 +95,6 @@ function formatTime(date: Date): string {
   return `${hh}:${mm}`;
 }
 
-// 把 ISO 时间串转换为「本地日期」字符串，用来分组
 function getLocalDateFromISO(iso: string): string {
   return formatDate(new Date(iso));
 }
@@ -154,7 +153,6 @@ function getLunarInfoForDate(date: Date) {
   }
 }
 
-// 天气信息文案
 function getWeatherSummary(weather?: DayMetaWeather): string {
   if (!weather) return "天气数据暂无";
   const parts: string[] = [];
@@ -169,7 +167,7 @@ function getWeatherSummary(weather?: DayMetaWeather): string {
 
 const weekdayText = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-// 内置事件 ID，用来防止误删
+// 内置事件 ID，用来限制删除
 const BUILTIN_EVENT_IDS = new Set(DEFAULT_EVENT_DEFS.map((d) => d.id));
 
 const App: React.FC = () => {
@@ -180,20 +178,17 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("log");
   const [selectedDate, setSelectedDate] = useState<string>(formatDate(new Date()));
 
-  // 编辑记录
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [editingTime, setEditingTime] = useState<string>("");
   const [editingExtras, setEditingExtras] = useState<EventExtra>({});
 
-  // 管理打卡项
   const [isManageOpen, setIsManageOpen] = useState(false);
 
-  // 日历选择器
   const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState<number>(new Date().getFullYear());
   const [pickerMonth, setPickerMonth] = useState<number>(new Date().getMonth() + 1);
 
-  // 初始化：加载本地记录 + 自定义分类/打卡项
+  // 初始化数据
   useEffect(() => {
     try {
       const storedEvents = localStorage.getItem(EVENTS_KEY);
@@ -204,9 +199,7 @@ const App: React.FC = () => {
         );
         setEvents(parsed);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     try {
       const metaStr = localStorage.getItem(DAYMETA_KEY);
@@ -218,9 +211,7 @@ const App: React.FC = () => {
         });
         setDayMetaMap(map);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     try {
       const catStr = localStorage.getItem(CATEGORIES_KEY);
@@ -230,9 +221,7 @@ const App: React.FC = () => {
           setCategories(parsed);
         }
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     try {
       const defStr = localStorage.getItem(EVENTDEFS_KEY);
@@ -242,12 +231,10 @@ const App: React.FC = () => {
           setEventDefs(parsed);
         }
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
 
-  // 当天元数据 + 天气
+  // 初始化 & 今日天气
   useEffect(() => {
     const today = formatDate(new Date());
 
@@ -281,22 +268,21 @@ const App: React.FC = () => {
                   ...prev,
                   [today]: { ...(prev[today] || { date: today }), weather: w },
                 };
-                localStorage.setItem(DAYMETA_KEY, JSON.stringify(Object.values(updated)));
+                localStorage.setItem(
+                  DAYMETA_KEY,
+                  JSON.stringify(Object.values(updated)),
+                );
                 return updated;
               });
             })
-            .catch(() => {
-              // ignore
-            });
+            .catch(() => {});
         },
-        () => {
-          // ignore
-        },
+        () => {},
       );
     }
   }, [dayMetaMap]);
 
-  // URL 参数写入步数（未来可和捷径联动）
+  // 支持通过 URL 传 steps（方便未来用捷径同步 Apple 健康数据）
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const stepsParam = params.get("steps");
@@ -315,12 +301,11 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // 持久化 events
+  // 持久化
   useEffect(() => {
     localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
   }, [events]);
 
-  // 持久化 categories / eventDefs
   useEffect(() => {
     localStorage.setItem(CATEGORIES_KEY, JSON.stringify(categories));
   }, [categories]);
@@ -354,7 +339,7 @@ const App: React.FC = () => {
     return { id, label: "其他", color: "#8395a7" };
   };
 
-  // 打卡：单击即记录一个时间点
+  // 打卡：单击记录时间点
   const handleLogEvent = (eventDefId: string) => {
     const now = new Date();
     const record: EventRecord = {
@@ -370,7 +355,21 @@ const App: React.FC = () => {
     });
   };
 
-  // 编辑记录
+  // 修改某条记录的 extras（给今日打卡记录里的控件使用）
+  const updateEventExtras = (eventId: string, patch: Partial<EventExtra>) => {
+    setEvents((prev) => {
+      const list = prev.map((e) => {
+        if (e.id !== eventId) return e;
+        const mergedExtras = { ...(e.extras || {}), ...patch };
+        return { ...e, extras: mergedExtras };
+      });
+      return list.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      );
+    });
+  };
+
+  // 编辑弹窗
   const openEditEvent = (eventId: string) => {
     const evt = events.find((e) => e.id === eventId);
     if (!evt) return;
@@ -422,16 +421,37 @@ const App: React.FC = () => {
     if (editingEventId === eventId) closeEdit();
   };
 
-  // 每日记录：日期选择
+  // 手动记录今日步数（因为网页无法直接读取 Apple 健康数据）
+  const handleSetTodaySteps = () => {
+    const current = dayMetaMap[todayStr]?.steps;
+    const input = window.prompt(
+      "请输入今日步数",
+      typeof current === "number" ? String(current) : "",
+    );
+    if (!input) return;
+    const val = parseInt(input, 10);
+    if (Number.isNaN(val) || val < 0) {
+      alert("请输入正确的数字");
+      return;
+    }
+    setDayMetaMap((prev) => {
+      const updated: Record<string, DayMeta> = {
+        ...prev,
+        [todayStr]: { ...(prev[todayStr] || { date: todayStr }), steps: val },
+      };
+      localStorage.setItem(DAYMETA_KEY, JSON.stringify(Object.values(updated)));
+      return updated;
+    });
+  };
+
+  // 每日记录：选日期
   const openDatePicker = () => {
     const d = new Date(selectedDate);
     setPickerYear(d.getFullYear());
     setPickerMonth(d.getMonth() + 1);
     setIsDatePickerOpen(true);
   };
-
   const closeDatePicker = () => setIsDatePickerOpen(false);
-
   const handleSelectDate = (dateStr: string) => {
     setSelectedDate(dateStr);
     setIsDatePickerOpen(false);
@@ -477,7 +497,7 @@ const App: React.FC = () => {
     return cells;
   };
 
-  // 每日记录分类汇总（动态分类）
+  // 每日分类汇总
   const dailySummaryByCategory = useMemo(() => {
     const summary = new Map<EventCategoryId, number>();
     selectedDayEvents.forEach((evt) => {
@@ -498,13 +518,14 @@ const App: React.FC = () => {
     color: "#111",
     fontFamily:
       "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, -apple-system, 'Segoe UI', sans-serif",
+    fontSize: 15,
   };
 
   const mainStyle: React.CSSProperties = {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    padding: "12px 12px 76px 12px", // 底部预留 tab 空间
+    padding: "12px 12px 96px 12px", // 底部预留更多空间
     boxSizing: "border-box",
   };
 
@@ -517,10 +538,10 @@ const App: React.FC = () => {
   };
 
   const sectionTitleStyle: React.CSSProperties = {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: 600,
     marginBottom: 8,
-    color: "#333",
+    color: "#222",
   };
 
   const tabBarStyle: React.CSSProperties = {
@@ -530,7 +551,7 @@ const App: React.FC = () => {
     bottom: 0,
     borderTop: "1px solid rgba(0,0,0,0.06)",
     backgroundColor: "#ffffff",
-    padding: "8px 0 6px 0",
+    padding: "10px 0 9px 0",
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
@@ -540,25 +561,25 @@ const App: React.FC = () => {
   const tabButtonStyle = (active: boolean): React.CSSProperties => ({
     flex: 1,
     textAlign: "center",
-    fontSize: 13,
-    padding: "4px 0",
+    fontSize: 14,
+    padding: "8px 0",
     color: active ? "#1677ff" : "#666",
-    fontWeight: active ? 600 : 500,
+    fontWeight: active ? 700 : 500,
   });
 
   const pillButtonStyle = (color: string): React.CSSProperties => ({
     borderRadius: 999,
-    border: "none",
-    padding: "7px 12px",
-    fontSize: 14,
+    border: `1px solid ${color}`,
+    padding: "9px 14px",
+    fontSize: 15,
     fontWeight: 500,
-    color: "#fff",
-    background: color,
-    margin: "4px 8px 4px 0",
+    color,
+    background: "#ffffff",
+    margin: "5px 8px 5px 0",
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.15)",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
   });
 
   const renderHeader = () => {
@@ -579,28 +600,40 @@ const App: React.FC = () => {
           }}
         >
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: "#111" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#111" }}>
               HealthKey
             </div>
-            <div style={{ fontSize: 13, color: "#666", marginTop: 4 }}>
+            <div style={{ fontSize: 14, color: "#666", marginTop: 4 }}>
               {todayLocalStr} · {todayWeekday}
             </div>
-            <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>
+            <div style={{ fontSize: 13, color: "#555", marginTop: 4 }}>
               {headerLunar.lunarText}
               {headerLunar.term && ` · ${headerLunar.term}`}
               {headerLunar.holiday && ` · ${headerLunar.holiday}`}
             </div>
           </div>
-          <div style={{ textAlign: "right", fontSize: 11, color: "#555" }}>
-            <div style={{ marginBottom: 2 }}>
+          <div style={{ textAlign: "right", fontSize: 12, color: "#555" }}>
+            <div style={{ marginBottom: 4 }}>
               步数：
               {typeof todayMeta?.steps === "number"
                 ? `${todayMeta.steps} 步`
                 : "未记录"}
+              <button
+                onClick={handleSetTodaySteps}
+                style={{
+                  marginLeft: 6,
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "2px 8px",
+                  fontSize: 11,
+                  backgroundColor: "#eef3ff",
+                  color: "#1677ff",
+                }}
+              >
+                记录步数
+              </button>
             </div>
-            <div style={{ maxWidth: 140 }}>
-              {getWeatherSummary(todayMeta?.weather)}
-            </div>
+            <div style={{ maxWidth: 160 }}>{getWeatherSummary(todayMeta?.weather)}</div>
           </div>
         </div>
       </header>
@@ -630,9 +663,9 @@ const App: React.FC = () => {
             style={{
               borderRadius: 999,
               border: "1px solid rgba(0,0,0,0.12)",
-              padding: "4px 10px",
+              padding: "5px 12px",
               backgroundColor: "#fff",
-              fontSize: 12,
+              fontSize: 13,
               color: "#555",
             }}
           >
@@ -643,7 +676,7 @@ const App: React.FC = () => {
           <div key={cat.id} style={{ marginBottom: 6 }}>
             <div
               style={{
-                fontSize: 12,
+                fontSize: 13,
                 color: "#888",
                 marginBottom: 4,
                 display: "flex",
@@ -697,14 +730,14 @@ const App: React.FC = () => {
         </div>
         <div
           style={{
-            maxHeight: "42vh",
+            maxHeight: "46vh",
             overflowY: "auto",
             paddingRight: 4,
             marginRight: -4,
           }}
         >
           {todayEvents.length === 0 && (
-            <div style={{ fontSize: 12, color: "#999", padding: "4px 0 4px 2px" }}>
+            <div style={{ fontSize: 13, color: "#999", padding: "4px 0 4px 2px" }}>
               还没有打卡，先从一个最容易的事件开始吧。
             </div>
           )}
@@ -714,65 +747,219 @@ const App: React.FC = () => {
             const dt = new Date(evt.timestamp);
             const time = formatTime(dt);
             const cat = getCategoryById(def.categoryId);
+            const extras = evt.extras || {};
+            const catId = cat.id;
+            const isDiet = catId === "diet";
+            const isExcretion = catId === "excretion";
 
             return (
               <div
                 key={evt.id}
                 style={{
-                  padding: "6px 4px",
+                  padding: "8px 4px",
                   borderBottom: "1px solid rgba(0,0,0,0.04)",
                   display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
+                  flexDirection: "column",
+                  gap: 4,
                 }}
               >
                 <div
-                  style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                  style={{ display: "flex", alignItems: "center", gap: 8 }}
                   onClick={() => openEditEvent(evt.id)}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span
-                      style={{
-                        fontSize: 11,
-                        padding: "2px 6px",
-                        borderRadius: 999,
-                        backgroundColor: cat.color,
-                        color: "#fff",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {def.label}
-                    </span>
-                    <span style={{ fontSize: 12, color: "#555" }}>{time}</span>
-                  </div>
-                  {evt.extras?.note && (
-                    <div
-                      style={{
-                        fontSize: 11,
-                        color: "#777",
-                        marginTop: 2,
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {evt.extras.note}
-                    </div>
-                  )}
+                  <span
+                    style={{
+                      fontSize: 13,
+                      padding: "3px 8px",
+                      borderRadius: 999,
+                      border: `1px solid ${cat.color}`,
+                      backgroundColor: "#fff",
+                      color: cat.color,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {def.label}
+                  </span>
+                  <span style={{ fontSize: 13, color: "#555" }}>{time}</span>
+                  <div style={{ flex: 1 }} />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteEvent(evt.id);
+                    }}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: "#d63031",
+                      fontSize: 12,
+                      padding: 4,
+                    }}
+                  >
+                    删除
+                  </button>
                 </div>
-                <button
-                  onClick={() => deleteEvent(evt.id)}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    color: "#d63031",
-                    fontSize: 11,
-                    padding: 4,
-                  }}
-                >
-                  删除
-                </button>
+
+                {extras.note && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#777",
+                      marginLeft: 2,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {extras.note}
+                  </div>
+                )}
+
+                {/* 数值/颜色类在列表中直接调整 */}
+                {(isDiet || isExcretion) && (
+                  <div
+                    style={{
+                      marginLeft: 2,
+                      marginTop: 2,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    {isDiet && def.id !== "water" && (
+                      <div style={{ fontSize: 12, color: "#555" }}>
+                        <div style={{ marginBottom: 2 }}>饱腹感</div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={extras.satietyPercent ?? 50}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              satietyPercent: parseInt(e.target.value, 10),
+                            })
+                          }
+                          style={{ width: "100%" }}
+                        />
+                        <div style={{ fontSize: 11, marginTop: 2 }}>
+                          {extras.satietyPercent ?? 50}%
+                        </div>
+                      </div>
+                    )}
+                    {isDiet && def.id === "water" && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#555",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <span>喝水：</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={extras.waterMl ?? ""}
+                          placeholder="ml"
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              waterMl: e.target.value
+                                ? parseInt(e.target.value, 10)
+                                : undefined,
+                            })
+                          }
+                          style={{
+                            width: 80,
+                            padding: 3,
+                            fontSize: 12,
+                          }}
+                        />
+                        <span style={{ fontSize: 12 }}>ml</span>
+                      </div>
+                    )}
+
+                    {isExcretion && def.id === "pee" && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#555",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span>排尿颜色：</span>
+                        <input
+                          type="color"
+                          value={extras.urineColor || "#ffeb3b"}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              urineColor: e.target.value,
+                            })
+                          }
+                          style={{
+                            width: 40,
+                            height: 24,
+                            padding: 0,
+                            border: "none",
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {isExcretion && def.id === "poop" && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#555",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span>排便颜色：</span>
+                        <input
+                          type="color"
+                          value={extras.stoolColor || "#795548"}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              stoolColor: e.target.value,
+                            })
+                          }
+                          style={{
+                            width: 40,
+                            height: 24,
+                            padding: 0,
+                            border: "none",
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {isExcretion && (
+                      <label
+                        style={{
+                          fontSize: 12,
+                          color: "#555",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={extras.isAbnormal ?? false}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              isAbnormal: e.target.checked,
+                            })
+                          }
+                        />
+                        <span>标记异常</span>
+                      </label>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -788,10 +975,10 @@ const App: React.FC = () => {
     return (
       <div style={cardStyle}>
         <div style={sectionTitleStyle}>当日概览</div>
-        <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
+        <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
           日期：{selectedDate} · {weekday}
         </div>
-        <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
+        <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
           天气：
           {getWeatherSummary(
             selectedDate === todayStr ? selectedDayMeta?.weather : undefined,
@@ -800,7 +987,7 @@ const App: React.FC = () => {
             "（当前仅支持显示今日天气，其他日期暂不记录天气历史）"}
         </div>
         {typeof selectedDayMeta?.steps === "number" && selectedDate === todayStr && (
-          <div style={{ fontSize: 12, color: "#555", marginBottom: 4 }}>
+          <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
             步数：{selectedDayMeta.steps} 步
           </div>
         )}
@@ -817,13 +1004,13 @@ const App: React.FC = () => {
               key={cat.id}
               style={{
                 borderRadius: 12,
-                padding: "6px 8px",
+                padding: "8px 10px",
                 backgroundColor: "rgba(0,0,0,0.02)",
               }}
             >
               <div
                 style={{
-                  fontSize: 11,
+                  fontSize: 12,
                   color: "#666",
                   display: "flex",
                   alignItems: "center",
@@ -842,7 +1029,7 @@ const App: React.FC = () => {
                 />
                 {cat.label}
               </div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "#222" }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#222" }}>
                 {dailySummaryByCategory.get(cat.id) || 0} 次
               </div>
             </div>
@@ -857,7 +1044,7 @@ const App: React.FC = () => {
       <div style={cardStyle}>
         <div style={{ ...sectionTitleStyle, marginBottom: 6 }}>当日详细记录</div>
         {selectedDayEvents.length === 0 && (
-          <div style={{ fontSize: 12, color: "#999" }}>这一天没有任何记录。</div>
+          <div style={{ fontSize: 13, color: "#999" }}>这一天没有任何记录。</div>
         )}
         {selectedDayEvents
           .slice()
@@ -890,14 +1077,14 @@ const App: React.FC = () => {
                     gap: 6,
                   }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 500, color: "#222" }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "#222" }}>
                     {def.label}
                   </div>
-                  <div style={{ fontSize: 12, color: "#666" }}>{time}</div>
+                  <div style={{ fontSize: 13, color: "#666" }}>{time}</div>
                 </div>
                 <div style={{ marginTop: 4 }}>
                   {extras.urineColor && (
-                    <div style={{ fontSize: 11, color: "#555", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, color: "#555", marginBottom: 2 }}>
                       排尿颜色：{" "}
                       <span
                         style={{
@@ -914,7 +1101,7 @@ const App: React.FC = () => {
                     </div>
                   )}
                   {extras.stoolColor && (
-                    <div style={{ fontSize: 11, color: "#555", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, color: "#555", marginBottom: 2 }}>
                       排便颜色：{" "}
                       <span
                         style={{
@@ -931,19 +1118,19 @@ const App: React.FC = () => {
                     </div>
                   )}
                   {typeof extras.satietyPercent === "number" && (
-                    <div style={{ fontSize: 11, color: "#555", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, color: "#555", marginBottom: 2 }}>
                       饱腹感：{extras.satietyPercent}%
                     </div>
                   )}
                   {typeof extras.waterMl === "number" && (
-                    <div style={{ fontSize: 11, color: "#555", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, color: "#555", marginBottom: 2 }}>
                       喝水：{extras.waterMl} ml
                     </div>
                   )}
                   {extras.isAbnormal && (
                     <div
                       style={{
-                        fontSize: 11,
+                        fontSize: 12,
                         color: "#d63031",
                         marginBottom: 2,
                         fontWeight: 500,
@@ -953,7 +1140,7 @@ const App: React.FC = () => {
                     </div>
                   )}
                   {extras.note && (
-                    <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: "#555", marginTop: 2 }}>
                       备注：{extras.note}
                     </div>
                   )}
@@ -1050,8 +1237,6 @@ const App: React.FC = () => {
     if (!def) return null;
 
     const extras = editingExtras;
-    const isDiet = getCategoryById(def.categoryId).id === "diet";
-    const isExcretion = getCategoryById(def.categoryId).id === "excretion";
 
     return (
       <div className="hk-overlay">
@@ -1090,124 +1275,6 @@ const App: React.FC = () => {
               style={{ width: "100%", padding: 4, fontSize: 13 }}
             />
           </div>
-
-          {isDiet && (
-            <>
-              <div style={{ marginBottom: 8, fontSize: 12 }}>
-                <div style={{ marginBottom: 4 }}>饱腹感（0% ~ 100%）</div>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  value={extras.satietyPercent ?? 50}
-                  onChange={(e) =>
-                    setEditingExtras((prev) => ({
-                      ...prev,
-                      satietyPercent: parseInt(e.target.value, 10),
-                    }))
-                  }
-                  style={{ width: "100%" }}
-                />
-                <div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
-                  {extras.satietyPercent ?? 50}%
-                </div>
-              </div>
-              {def.id === "water" && (
-                <div style={{ marginBottom: 8, fontSize: 12 }}>
-                  <div style={{ marginBottom: 4 }}>喝水（毫升）</div>
-                  <input
-                    type="number"
-                    min={0}
-                    value={extras.waterMl ?? ""}
-                    placeholder="例如 250"
-                    onChange={(e) =>
-                      setEditingExtras((prev) => ({
-                        ...prev,
-                        waterMl: e.target.value
-                          ? parseInt(e.target.value, 10)
-                          : undefined,
-                      }))
-                    }
-                    style={{ width: "100%", padding: 4, fontSize: 13 }}
-                  />
-                </div>
-              )}
-            </>
-          )}
-
-          {isExcretion && (
-            <>
-              {def.id === "pee" && (
-                <div style={{ marginBottom: 8, fontSize: 12 }}>
-                  <div style={{ marginBottom: 4 }}>排尿颜色</div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <input
-                      type="color"
-                      value={extras.urineColor || "#ffeb3b"}
-                      onChange={(e) =>
-                        setEditingExtras((prev) => ({
-                          ...prev,
-                          urineColor: e.target.value,
-                        }))
-                      }
-                      style={{ width: 40, height: 24, padding: 0, border: "none" }}
-                    />
-                    <div style={{ fontSize: 11, color: "#555" }}>
-                      点击色块选择接近尿液的颜色
-                    </div>
-                  </div>
-                </div>
-              )}
-              {def.id === "poop" && (
-                <div style={{ marginBottom: 8, fontSize: 12 }}>
-                  <div style={{ marginBottom: 4 }}>排便颜色</div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <input
-                      type="color"
-                      value={extras.stoolColor || "#795548"}
-                      onChange={(e) =>
-                        setEditingExtras((prev) => ({
-                          ...prev,
-                          stoolColor: e.target.value,
-                        }))
-                      }
-                      style={{ width: 40, height: 24, padding: 0, border: "none" }}
-                    />
-                    <div style={{ fontSize: 11, color: "#555" }}>
-                      点击色块选择接近排便的颜色
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div style={{ marginBottom: 8, fontSize: 12 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={extras.isAbnormal ?? false}
-                    onChange={(e) =>
-                      setEditingExtras((prev) => ({
-                        ...prev,
-                        isAbnormal: e.target.checked,
-                      }))
-                    }
-                  />
-                  <span>标记为异常情况</span>
-                </label>
-              </div>
-            </>
-          )}
 
           <div style={{ marginBottom: 12, fontSize: 12 }}>
             <div style={{ marginBottom: 4 }}>备注</div>
@@ -1271,7 +1338,7 @@ const App: React.FC = () => {
     );
   };
 
-  // 管理打卡项面板
+  // 管理打卡项
   const renderManagePanel = () => {
     if (!isManageOpen) return null;
 
@@ -1303,6 +1370,15 @@ const App: React.FC = () => {
         return;
       }
       setEventDefs((prev) => prev.filter((d) => d.id !== id));
+    };
+
+    const addCategory = () => {
+      const newCat: Category = {
+        id: `cat_${Date.now()}`,
+        label: "新分类",
+        color: "#10ac84",
+      };
+      setCategories((prev) => [...prev, newCat]);
     };
 
     return (
@@ -1342,12 +1418,12 @@ const App: React.FC = () => {
               marginRight: -4,
             }}
           >
-            <div style={{ marginBottom: 10 }}>
+            <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
                 分类
               </div>
               <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>
-                可以调整每个分类的名称和颜色（目前固定四类：饮食 / 排泄 / 睡眠 / 活动）。
+                可以新增和调整每个分类的名称与颜色。
               </div>
               {categories.map((cat) => (
                 <div
@@ -1386,6 +1462,20 @@ const App: React.FC = () => {
                   />
                 </div>
               ))}
+              <button
+                onClick={addCategory}
+                style={{
+                  marginTop: 4,
+                  borderRadius: 999,
+                  border: "1px dashed rgba(0,0,0,0.2)",
+                  padding: "4px 10px",
+                  backgroundColor: "#fff",
+                  fontSize: 12,
+                  color: "#1677ff",
+                }}
+              >
+                + 新增分类
+              </button>
             </div>
 
             <div>
@@ -1393,7 +1483,7 @@ const App: React.FC = () => {
                 打卡事件
               </div>
               <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>
-                内置事件可改名和变更分类；自定义事件可以删除。
+                内置事件可改名和分类；自定义事件可以删除。
               </div>
               {eventDefs.map((d) => (
                 <div
@@ -1489,9 +1579,9 @@ const App: React.FC = () => {
                   style={{
                     borderRadius: 999,
                     border: "1px solid rgba(0,0,0,0.12)",
-                    padding: "4px 10px",
+                    padding: "5px 12px",
                     backgroundColor: "#fff",
-                    fontSize: 12,
+                    fontSize: 13,
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
@@ -1514,7 +1604,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* 底部 TabBar */}
       <footer style={tabBarStyle}>
         <button
           style={tabButtonStyle(activeTab === "log")}
@@ -1534,7 +1623,6 @@ const App: React.FC = () => {
       {renderEditPanel()}
       {renderManagePanel()}
 
-      {/* 全局样式，强制浅色 + 弹层/日历样式 */}
       <style>{`
         body {
           background-color: #f4f5f7 !important;
