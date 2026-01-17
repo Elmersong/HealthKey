@@ -173,6 +173,28 @@ const weekdayText = ["周日", "周一", "周二", "周三", "周四", "周五",
 // 内置事件 ID，用来限制删除
 const BUILTIN_EVENT_IDS = new Set(DEFAULT_EVENT_DEFS.map((d) => d.id));
 
+// ICS 导出相关工具
+function formatICSDateTimeLocal(iso: string): string {
+  const d = new Date(iso);
+  const yyyy = d.getFullYear();
+  const mm = `${d.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${d.getDate()}`.padStart(2, "0");
+  const HH = `${d.getHours()}`.padStart(2, "0");
+  const MM = `${d.getMinutes()}`.padStart(2, "0");
+  const SS = `${d.getSeconds()}`.padStart(2, "0");
+  // 作为本地时间（不加 Z）
+  return `${yyyy}${mm}${dd}T${HH}${MM}${SS}`;
+}
+
+function escapeICSText(text: string): string {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,")
+    .replace(/\r\n/g, "\\n")
+    .replace(/\n/g, "\\n");
+}
+
 const App: React.FC = () => {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
@@ -519,61 +541,90 @@ const App: React.FC = () => {
     return summary;
   }, [selectedDayEvents, eventDefs]);
 
-  // 导出到日历（当前提供一个可复制的文本汇总，后续可以升级 ICS）
-  const handleExportCalendar = () => {
-    if (!selectedDayEvents.length) {
-      alert("这一天没有记录可导出。");
+  // ICS 导出
+  const exportSelectedDayAsICS = () => {
+    if (selectedDayEvents.length === 0) {
+      alert("该日没有打卡记录，无法导出。");
       return;
     }
-    const d = new Date(selectedDate);
-    const weekday = weekdayText[d.getDay()];
-    const lines: string[] = [];
-    lines.push(`日期：${selectedDate}（${weekday}）`);
-    lines.push("");
-    lines.push("分类汇总：");
-    categories.forEach((cat) => {
-      const c = dailySummaryByCategory.get(cat.id) || 0;
-      lines.push(`- ${cat.label}：${c} 次`);
-    });
-    lines.push("");
-    lines.push("详细记录：");
-    selectedDayEvents
-      .slice()
-      .sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-      )
-      .forEach((evt) => {
-        const def = getEventDef(evt.eventDefId);
-        if (!def) return;
-        const time = formatTime(new Date(evt.timestamp));
-        const extras = evt.extras || {};
-        let extraText = "";
-        if (typeof extras.satietyPercent === "number") {
-          extraText += `，饱腹感 ${extras.satietyPercent}%`;
-        }
-        if (typeof extras.waterMl === "number") {
-          extraText += `，喝水 ${extras.waterMl} ml`;
-        }
-        if (typeof extras.activityIntensity === "number") {
-          extraText += `，运动强度 ${extras.activityIntensity}%`;
-        }
-        if (typeof extras.sleepDepth === "number") {
-          extraText += `，睡眠深度 ${extras.sleepDepth}%`;
-        }
-        if (extras.isAbnormal) {
-          extraText += "，标记异常";
-        }
-        if (extras.note) {
-          extraText += `，备注：${extras.note}`;
-        }
-        lines.push(`- ${time} · ${def.label}${extraText}`);
-      });
 
-    alert(
-      `可以复制以下内容粘贴到系统日历的备注中：\n\n${lines.join(
-        "\n",
-      )}\n\n（后续可以升级为真正的日历文件导出）`,
+    const sorted = [...selectedDayEvents].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
+
+    const lines: string[] = [];
+    lines.push("BEGIN:VCALENDAR");
+    lines.push("VERSION:2.0");
+    lines.push("PRODID:-//HealthKey//BodyLog//CN");
+
+    const nowStamp = formatICSDateTimeLocal(new Date().toISOString());
+
+    sorted.forEach((evt) => {
+      const def = getEventDef(evt.eventDefId);
+      if (!def) return;
+      const cat = getCategoryById(def.categoryId);
+      const start = new Date(evt.timestamp);
+      const end = new Date(start.getTime() + 15 * 60 * 1000);
+
+      const dtStart = formatICSDateTimeLocal(start.toISOString());
+      const dtEnd = formatICSDateTimeLocal(end.toISOString());
+
+      const extras = evt.extras || {};
+      const parts: string[] = [];
+      parts.push(`时间: ${formatTime(start)}`);
+      parts.push(`分类: ${cat.label}`);
+
+      if (typeof extras.satietyPercent === "number") {
+        parts.push(`饱腹感: ${extras.satietyPercent}%`);
+      }
+      if (typeof extras.waterMl === "number") {
+        parts.push(`喝水: ${extras.waterMl} ml`);
+      }
+      if (typeof extras.activityIntensity === "number") {
+        parts.push(`运动强度: ${extras.activityIntensity}%`);
+      }
+      if (typeof extras.sleepDepth === "number") {
+        parts.push(`睡眠深度: ${extras.sleepDepth}%`);
+      }
+      if (extras.urineColor) {
+        parts.push(`排尿颜色: ${extras.urineColor}`);
+      }
+      if (extras.stoolColor) {
+        parts.push(`排便颜色: ${extras.stoolColor}`);
+      }
+      if (extras.isAbnormal) {
+        parts.push(`标记异常: 是`);
+      }
+      if (extras.note) {
+        parts.push(`备注: ${extras.note}`);
+      }
+
+      const description = escapeICSText(parts.join("\n"));
+
+      lines.push("BEGIN:VEVENT");
+      lines.push(`UID:${evt.id}@healthkey`);
+      lines.push(`DTSTAMP:${nowStamp}`);
+      lines.push(`DTSTART:${dtStart}`);
+      lines.push(`DTEND:${dtEnd}`);
+      lines.push(`SUMMARY:${escapeICSText(def.label)}`);
+      lines.push(`DESCRIPTION:${description}`);
+      lines.push("END:VEVENT");
+    });
+
+    lines.push("END:VCALENDAR");
+
+    const icsContent = lines.join("\r\n");
+    const blob = new Blob([icsContent], {
+      type: "text/calendar;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `HealthKey_${selectedDate}.ics`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   // UI 样式
@@ -592,7 +643,7 @@ const App: React.FC = () => {
     flex: 1,
     display: "flex",
     flexDirection: "column",
-    padding: "12px 12px 96px 12px",
+    padding: "4px 12px 96px 12px",
     boxSizing: "border-box",
   };
 
@@ -607,7 +658,7 @@ const App: React.FC = () => {
   const sectionTitleStyle: React.CSSProperties = {
     fontSize: 15,
     fontWeight: 600,
-    marginBottom: 0,
+    marginBottom: 8,
     color: "#222",
   };
 
@@ -618,7 +669,7 @@ const App: React.FC = () => {
     bottom: 0,
     borderTop: "1px solid rgba(0,0,0,0.06)",
     backgroundColor: "#ffffff",
-    padding: "10px 0 10px 0",
+    padding: "12px 0 10px 0",
     display: "flex",
     justifyContent: "space-around",
     alignItems: "center",
@@ -628,7 +679,7 @@ const App: React.FC = () => {
   const tabButtonStyle = (active: boolean): React.CSSProperties => ({
     flex: 1,
     textAlign: "center",
-    fontSize: 15,
+    fontSize: 14,
     padding: "10px 0",
     color: active ? "#1677ff" : "#666",
     fontWeight: active ? 700 : 500,
@@ -650,86 +701,15 @@ const App: React.FC = () => {
   });
 
   const renderHeader = () => {
-    const todayLocalStr = formatDate(headerDate);
-    const termOrHoliday = headerLunar.term || headerLunar.holiday;
-    const dateLine = termOrHoliday
-      ? `${todayLocalStr} · ${todayWeekday} · ${termOrHoliday}`
-      : `${todayLocalStr} · ${todayWeekday}`;
-
     return (
       <header
         style={{
-          padding: "10px 12px 4px 12px",
+          padding: "10px 12px 2px 12px",
           boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-            }}
-          >
-            <div style={{ fontSize: 22, fontWeight: 700, color: "#111" }}>
-              HealthKey
-            </div>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginTop: 2,
-            }}
-          >
-            <div style={{ fontSize: 14, color: "#666" }}>{dateLine}</div>
-            <div
-              style={{
-                fontSize: 12,
-                color: "#555",
-                textAlign: "right",
-                maxWidth: 180,
-                marginLeft: 8,
-              }}
-            >
-              {getWeatherSummary(todayMeta?.weather)}
-            </div>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginTop: 2,
-            }}
-          >
-            <div style={{ fontSize: 13, color: "#555" }}>
-              {headerLunar.lunarText}
-            </div>
-            <div style={{ textAlign: "right", fontSize: 12, color: "#555" }}>
-              步数：
-              {typeof todayMeta?.steps === "number"
-                ? `${todayMeta.steps} 步`
-                : "未记录"}
-              <button
-                onClick={handleSetTodaySteps}
-                style={{
-                  marginLeft: 6,
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "2px 8px",
-                  fontSize: 11,
-                  backgroundColor: "#eef3ff",
-                  color: "#1677ff",
-                }}
-              >
-                记录步数
-              </button>
-            </div>
-          </div>
+        <div style={{ fontSize: 22, fontWeight: 700, color: "#111" }}>
+          HealthKey
         </div>
       </header>
     );
@@ -808,387 +788,429 @@ const App: React.FC = () => {
   };
 
   const renderTodayList = () => {
+    const holidayOrTerm = headerLunar.holiday || headerLunar.term;
+    const dateLine =
+      todayStr +
+      " · " +
+      todayWeekday +
+      (holidayOrTerm ? ` · ${holidayOrTerm}` : "");
+
     return (
-      <div style={{ ...cardStyle, paddingTop: 8 }}>
+      <div style={{ ...cardStyle, paddingTop: 10 }}>
+        {/* 今日概览（日期 + 农历 + 天气 + 步数） */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            marginBottom: 8,
+            gap: 12,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "#222" }}>
+              {dateLine}
+            </div>
+            <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+              {headerLunar.lunarText}
+            </div>
+          </div>
+          <div style={{ textAlign: "right", fontSize: 12, color: "#555" }}>
+            <div>{getWeatherSummary(todayMeta?.weather)}</div>
+            <div style={{ marginTop: 4 }}>
+              步数：
+              {typeof todayMeta?.steps === "number"
+                ? `${todayMeta.steps} 步`
+                : "未记录"}
+              <button
+                onClick={handleSetTodaySteps}
+                style={{
+                  marginLeft: 6,
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "2px 8px",
+                  fontSize: 11,
+                  backgroundColor: "#eef3ff",
+                  color: "#1677ff",
+                }}
+              >
+                记录步数
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div
           style={{
             ...sectionTitleStyle,
-            marginBottom: 6,
-            position: "sticky",
-            top: 0,
-            backgroundColor: "#ffffff",
-            paddingBottom: 4,
-            zIndex: 1,
+            marginBottom: 4,
           }}
         >
           今日打卡记录
         </div>
-        <div
-          style={{
-            maxHeight: "70vh",
-            overflowY: "auto",
-            paddingRight: 4,
-            marginRight: -4,
-          }}
-        >
-          {todayEvents.length === 0 && (
-            <div style={{ fontSize: 13, color: "#999", padding: "4px 0 4px 2px" }}>
-              还没有打卡，先从一个最容易的事件开始吧。
-            </div>
-          )}
-          {todayEvents.map((evt) => {
-            const def = getEventDef(evt.eventDefId);
-            if (!def) return null;
-            const dt = new Date(evt.timestamp);
-            const time = formatTime(dt);
-            const cat = getCategoryById(def.categoryId);
-            const extras = evt.extras || {};
-            const catId = cat.id;
-            const isDiet = catId === "diet";
-            const isExcretion = catId === "excretion";
 
-            const needsSatiety =
-              isDiet &&
-              ["breakfast", "lunch", "dinner", "snack", "fruit"].includes(def.id);
-            const isWater = def.id === "water";
-            const isExercise = def.id === "exercise";
-            const isWake = def.id === "wake";
+        {todayEvents.length === 0 && (
+          <div style={{ fontSize: 13, color: "#999", padding: "4px 0 4px 2px" }}>
+            还没有打卡，先从一个最容易的事件开始吧。
+          </div>
+        )}
 
-            const satiety = extras.satietyPercent ?? 50;
-            const water = extras.waterMl ?? 500;
-            const intensity = extras.activityIntensity ?? 50;
-            const depth = extras.sleepDepth ?? 50;
+        {todayEvents.map((evt) => {
+          const def = getEventDef(evt.eventDefId);
+          if (!def) return null;
+          const dt = new Date(evt.timestamp);
+          const time = formatTime(dt);
+          const cat = getCategoryById(def.categoryId);
+          const extras = evt.extras || {};
+          const catId = cat.id;
+          const isDiet = catId === "diet";
+          const isExcretion = catId === "excretion";
 
-            const isSwiped = swipedEventId === evt.id;
+          const needsSatiety =
+            isDiet &&
+            ["breakfast", "lunch", "dinner", "snack", "fruit"].includes(def.id);
+          const isWater = def.id === "water";
+          const isExercise = def.id === "exercise";
+          const isWake = def.id === "wake";
 
-            return (
+          const satiety = extras.satietyPercent ?? 50;
+          const water = extras.waterMl ?? 500;
+          const intensity = extras.activityIntensity ?? 50;
+          const depth = extras.sleepDepth ?? 50;
+
+          const isSwiped = swipedEventId === evt.id;
+
+          const isPee = isExcretion && def.id === "pee";
+          const isPoop = isExcretion && def.id === "poop";
+          const excretionColor = isPee
+            ? extras.urineColor || "#fff176"
+            : isPoop
+            ? extras.stoolColor || "#795548"
+            : "#ffffff";
+
+          return (
+            <div
+              key={evt.id}
+              className="hk-today-row"
+              onTouchStart={(e) => {
+                if (e.touches.length > 0) {
+                  setTouchStartX(e.touches[0].clientX);
+                }
+              }}
+              onTouchMove={(e) => {
+                if (touchStartX == null || e.touches.length === 0) return;
+                const deltaX = e.touches[0].clientX - touchStartX;
+                if (deltaX < -40) {
+                  setSwipedEventId(evt.id);
+                } else if (deltaX > 40) {
+                  setSwipedEventId(null);
+                }
+              }}
+              onTouchEnd={() => {
+                setTouchStartX(null);
+              }}
+            >
               <div
-                key={evt.id}
+                className="hk-today-row-delete"
+                onClick={() => deleteEvent(evt.id)}
+              >
+                删除
+              </div>
+              <div
+                className="hk-today-row-content"
                 style={{
-                  position: "relative",
-                  overflow: "hidden",
-                  marginBottom: 4,
-                }}
-                onTouchStart={(e) => {
-                  if (e.touches.length > 0) {
-                    setTouchStartX(e.touches[0].clientX);
-                  }
-                }}
-                onTouchMove={(e) => {
-                  if (touchStartX == null || e.touches.length === 0) return;
-                  const deltaX = e.touches[0].clientX - touchStartX;
-                  if (deltaX < -40) {
-                    setSwipedEventId(evt.id);
-                  } else if (deltaX > 40) {
-                    setSwipedEventId(null);
-                  }
-                }}
-                onTouchEnd={() => {
-                  setTouchStartX(null);
+                  padding: "8px 4px",
+                  borderBottom: "1px solid rgba(0,0,0,0.04)",
+                  transform: isSwiped ? "translateX(-64px)" : "translateX(0)",
                 }}
               >
-                {/* 右侧删除区 */}
                 <div
                   style={{
-                    position: "absolute",
-                    right: 0,
-                    top: 0,
-                    bottom: 0,
-                    width: 72,
-                    backgroundColor: "#ffe5e5",
                     display: "flex",
                     alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteEvent(evt.id);
-                    }}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: "#c0392b",
-                      fontSize: 12,
-                    }}
-                  >
-                    删除
-                  </button>
-                </div>
-
-                {/* 内容卡片 */}
-                <div
-                  style={{
-                    padding: "10px 6px",
-                    borderBottom: "1px solid rgba(0,0,0,0.04)",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 4,
-                    backgroundColor: "#ffffff",
-                    transform: isSwiped ? "translateX(-72px)" : "translateX(0)",
-                    transition: "transform 0.18s ease-out",
+                    gap: 8,
+                    marginBottom: 4,
                   }}
                   onClick={() => openEditEvent(evt.id)}
                 >
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  <span
+                    style={{
+                      fontSize: 13,
+                      padding: "3px 8px",
+                      borderRadius: 999,
+                      border: `1px solid ${cat.color}`,
+                      backgroundColor: "#fff",
+                      color: cat.color,
+                      whiteSpace: "nowrap",
+                    }}
                   >
-                    <span
-                      style={{
-                        fontSize: 13,
-                        padding: "3px 8px",
-                        borderRadius: 999,
-                        border: `1px solid ${cat.color}`,
-                        backgroundColor: "#fff",
-                        color: cat.color,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {def.label}
-                    </span>
+                    {def.label}
+                  </span>
 
-                    <div style={{ flex: 1 }} />
+                  <div style={{ flex: 1 }} />
 
-                    <span
-                      style={{
-                        fontSize: 13,
-                        color: "#555",
-                        minWidth: 52,
-                        textAlign: "right",
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSwipedEventId(isSwiped ? null : evt.id);
-                      }}
-                    >
-                      {time}
-                    </span>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      color: "#555",
+                      minWidth: 52,
+                      textAlign: "right",
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSwipedEventId(isSwiped ? null : evt.id);
+                    }}
+                  >
+                    {time}
+                  </span>
+                </div>
+
+                {extras.note && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#777",
+                      marginLeft: 2,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      marginBottom: 4,
+                    }}
+                  >
+                    {extras.note}
                   </div>
+                )}
 
-                  {extras.note && (
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: "#777",
-                        marginLeft: 2,
-                      }}
-                    >
-                      {extras.note}
-                    </div>
-                  )}
-
-                  {(needsSatiety ||
-                    isWater ||
-                    isExercise ||
-                    isWake ||
-                    isExcretion) && (
-                    <div
-                      style={{
-                        marginLeft: 2,
-                        marginTop: 4,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                      }}
-                    >
-                      {needsSatiety && (
-                        <div
+                {(needsSatiety ||
+                  isWater ||
+                  isExercise ||
+                  isWake ||
+                  isExcretion) && (
+                  <div
+                    style={{
+                      marginLeft: 2,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    {needsSatiety && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span
                           style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            value={satiety}
-                            onChange={(e) =>
-                              updateEventExtras(evt.id, {
-                                satietyPercent: parseInt(e.target.value, 10),
-                              })
-                            }
-                            style={{ flex: 1 }}
-                          />
-                          <span
-                            style={{
-                              fontSize: 12,
-                              color: "#333",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            饱腹感 {satiety}%
-                          </span>
-                        </div>
-                      )}
-
-                      {isWater && (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <input
-                            type="range"
-                            min={0}
-                            max={1000}
-                            step={50}
-                            value={water}
-                            onChange={(e) =>
-                              updateEventExtras(evt.id, {
-                                waterMl: parseInt(e.target.value, 10),
-                              })
-                            }
-                            style={{ flex: 1 }}
-                          />
-                          <span
-                            style={{
-                              fontSize: 12,
-                              color: "#333",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            喝水量 {water} ml
-                          </span>
-                        </div>
-                      )}
-
-                      {isExercise && (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            value={intensity}
-                            onChange={(e) =>
-                              updateEventExtras(evt.id, {
-                                activityIntensity: parseInt(e.target.value, 10),
-                              })
-                            }
-                            style={{ flex: 1 }}
-                          />
-                          <span
-                            style={{
-                              fontSize: 12,
-                              color: "#333",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            运动强度 {intensity}%
-                          </span>
-                        </div>
-                      )}
-
-                      {isWake && (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            value={depth}
-                            onChange={(e) =>
-                              updateEventExtras(evt.id, {
-                                sleepDepth: parseInt(e.target.value, 10),
-                              })
-                            }
-                            style={{ flex: 1 }}
-                          />
-                          <span
-                            style={{
-                              fontSize: 12,
-                              color: "#333",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            睡眠深度 {depth}%
-                          </span>
-                        </div>
-                      )}
-
-                      {isExcretion && (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 10,
                             fontSize: 12,
                             color: "#555",
+                            minWidth: 54,
                           }}
                         >
-                          {def.id === "pee" && (
-                            <>
-                              <span>颜色</span>
-                              <span
-                                style={{
-                                  width: 18,
-                                  height: 18,
-                                  borderRadius: 4,
-                                  border: "1px solid rgba(0,0,0,0.1)",
-                                  backgroundColor:
-                                    extras.urineColor || "#fff176",
-                                }}
-                              />
-                            </>
-                          )}
-                          {def.id === "poop" && (
-                            <>
-                              <span>颜色</span>
-                              <span
-                                style={{
-                                  width: 18,
-                                  height: 18,
-                                  borderRadius: 4,
-                                  border: "1px solid rgba(0,0,0,0.1)",
-                                  backgroundColor:
-                                    extras.stoolColor || "#795548",
-                                }}
-                              />
-                            </>
-                          )}
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 6,
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={extras.isAbnormal ?? false}
-                              onChange={(e) =>
-                                updateEventExtras(evt.id, {
-                                  isAbnormal: e.target.checked,
-                                })
-                              }
-                            />
-                            <span>标记异常</span>
-                          </label>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                          饱腹感
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#333",
+                            width: 46,
+                            textAlign: "right",
+                          }}
+                        >
+                          {satiety}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={satiety}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              satietyPercent: parseInt(e.target.value, 10),
+                            })
+                          }
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    )}
+
+                    {isWater && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#555",
+                            minWidth: 54,
+                          }}
+                        >
+                          喝水量
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#333",
+                            width: 64,
+                            textAlign: "right",
+                          }}
+                        >
+                          {water} ml
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1000}
+                          step={50}
+                          value={water}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              waterMl: parseInt(e.target.value, 10),
+                            })
+                          }
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    )}
+
+                    {isExercise && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#555",
+                            minWidth: 54,
+                          }}
+                        >
+                          运动强度
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#333",
+                            width: 46,
+                            textAlign: "right",
+                          }}
+                        >
+                          {intensity}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={intensity}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              activityIntensity: parseInt(e.target.value, 10),
+                            })
+                          }
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    )}
+
+                    {isWake && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#555",
+                            minWidth: 54,
+                          }}
+                        >
+                          睡眠深度
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "#333",
+                            width: 46,
+                            textAlign: "right",
+                          }}
+                        >
+                          {depth}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={depth}
+                          onChange={(e) =>
+                            updateEventExtras(evt.id, {
+                              sleepDepth: parseInt(e.target.value, 10),
+                            })
+                          }
+                          style={{ flex: 1 }}
+                        />
+                      </div>
+                    )}
+
+                    {isExcretion && (isPee || isPoop) && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          fontSize: 12,
+                          color: "#555",
+                        }}
+                      >
+                        <span style={{ minWidth: 54 }}>
+                          {isPee ? "排尿" : "排便"}
+                        </span>
+                        <span
+                          style={{
+                            width: 18,
+                            height: 18,
+                            borderRadius: 4,
+                            border: "1px solid rgba(0,0,0,0.1)",
+                            backgroundColor: excretionColor,
+                          }}
+                        />
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={extras.isAbnormal ?? false}
+                            onChange={(e) =>
+                              updateEventExtras(evt.id, {
+                                isAbnormal: e.target.checked,
+                              })
+                            }
+                          />
+                          <span>异常</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -1197,48 +1219,25 @@ const App: React.FC = () => {
     const d = new Date(selectedDate);
     const weekday = weekdayText[d.getDay()];
 
+    const isToday = selectedDate === todayStr;
+    const meta = isToday ? selectedDayMeta || todayMeta : selectedDayMeta;
+
     return (
       <div style={cardStyle}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 6,
-          }}
-        >
-          <div style={sectionTitleStyle}>当日概览</div>
-          <button
-            onClick={handleExportCalendar}
-            style={{
-              borderRadius: 999,
-              border: "1px solid rgba(0,0,0,0.12)",
-              padding: "5px 10px",
-              backgroundColor: "#fff",
-              fontSize: 12,
-              color: "#1677ff",
-              whiteSpace: "nowrap",
-            }}
-          >
-            导出到日历
-          </button>
-        </div>
-        <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
+        <div style={sectionTitleStyle}>当日概览</div>
+        <div style={{ fontSize: 13, color: "#555", marginBottom: 2 }}>
           日期：{selectedDate} · {weekday}
+        </div>
+        <div style={{ fontSize: 13, color: "#555", marginBottom: 2 }}>
+          步数：
+          {typeof meta?.steps === "number" ? `${meta.steps} 步` : "未记录"}
         </div>
         <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
           天气：
-          {getWeatherSummary(
-            selectedDate === todayStr ? selectedDayMeta?.weather : undefined,
-          )}
-          {selectedDate !== todayStr &&
-            "（当前仅支持显示今日天气，其他日期暂不记录天气历史）"}
+          {isToday
+            ? getWeatherSummary(meta?.weather)
+            : "当前仅支持显示今日天气，其他日期暂不记录天气历史"}
         </div>
-        {typeof selectedDayMeta?.steps === "number" && selectedDate === todayStr && (
-          <div style={{ fontSize: 13, color: "#555", marginBottom: 4 }}>
-            步数：{selectedDayMeta.steps} 步
-          </div>
-        )}
         <div
           style={{
             display: "grid",
@@ -1498,6 +1497,9 @@ const App: React.FC = () => {
     const cat = getCategoryById(def.categoryId);
     const isExcretion = cat.id === "excretion";
 
+    const isPee = isExcretion && def.id === "pee";
+    const isPoop = isExcretion && def.id === "poop";
+
     return (
       <div className="hk-overlay">
         <div className="hk-overlay-backdrop" onClick={closeEdit} />
@@ -1536,10 +1538,9 @@ const App: React.FC = () => {
             />
           </div>
 
-          {/* 排尿/排便：颜色 + 异常 */}
           {isExcretion && (
             <div style={{ marginBottom: 10, fontSize: 12 }}>
-              {def.id === "pee" && (
+              {isPee && (
                 <>
                   <div style={{ marginBottom: 4 }}>排尿颜色</div>
                   <input
@@ -1560,7 +1561,7 @@ const App: React.FC = () => {
                   />
                 </>
               )}
-              {def.id === "poop" && (
+              {isPoop && (
                 <>
                   <div style={{ marginBottom: 4 }}>排便颜色</div>
                   <input
@@ -1902,31 +1903,55 @@ const App: React.FC = () => {
                   justifyContent: "space-between",
                   alignItems: "center",
                   marginBottom: 4,
+                  gap: 8,
                 }}
               >
                 <div style={sectionTitleStyle}>每日记录</div>
-                <button
-                  onClick={openDatePicker}
+                <div
                   style={{
-                    borderRadius: 999,
-                    border: "1px solid rgba(0,0,0,0.12)",
-                    padding: "5px 12px",
-                    backgroundColor: "#fff",
-                    fontSize: 13,
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    color: "#333",
                   }}
                 >
-                  <span role="img" aria-label="calendar">
-                    📅
-                  </span>
-                  {selectedDate}
-                </button>
+                  <button
+                    onClick={exportSelectedDayAsICS}
+                    style={{
+                      borderRadius: 999,
+                      border: "1px solid rgba(0,0,0,0.12)",
+                      padding: "6px 10px",
+                      backgroundColor: "#fff",
+                      fontSize: 12,
+                      color: "#1677ff",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    导出到日历
+                  </button>
+                  <button
+                    onClick={openDatePicker}
+                    style={{
+                      borderRadius: 999,
+                      border: "1px solid rgba(0,0,0,0.12)",
+                      padding: "6px 10px",
+                      backgroundColor: "#fff",
+                      fontSize: 13,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      color: "#333",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <span role="img" aria-label="calendar">
+                      📅
+                    </span>
+                    {selectedDate}
+                  </button>
+                </div>
               </div>
               <div style={{ fontSize: 12, color: "#777" }}>
-                仅可选择有记录的日期；不同日期会显示对应日期的打卡情况。
+                仅可选择有记录的日期；导出为日历后，可在系统日历中查看当日打卡。
               </div>
             </div>
             {renderDailySummary()}
@@ -2025,6 +2050,29 @@ const App: React.FC = () => {
         }
         .hk-calendar-cell.empty {
           background: transparent;
+        }
+
+        .hk-today-row {
+          position: relative;
+          overflow: hidden;
+        }
+        .hk-today-row-delete {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          width: 64px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background-color: #ffe5e5;
+          color: #c0392b;
+          font-size: 12px;
+        }
+        .hk-today-row-content {
+          position: relative;
+          background-color: #ffffff;
+          transition: transform 0.18s ease-out;
         }
       `}</style>
     </div>
